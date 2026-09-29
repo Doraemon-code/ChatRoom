@@ -15,12 +15,23 @@ if rg -n -g '!*.test.ts' -g '!*_test.go' 'log\.(Print|Printf|Println|Fatal|Panic
 	exit 1
 fi
 
-test "$(rg -n 'proxy_set_header (User-Agent|X-Forwarded-For|X-Real-IP|Forwarded) ""' deploy/nginx/nginx.conf | wc -l)" -eq 4
+# The zero-knowledge packages must not touch the filesystem or spawn processes:
+# file ciphertext lives in RAM only.
+if rg -n -g '!*_test.go' 'os\.(Create|Open|OpenFile|CreateTemp|TempFile|WriteFile|ReadFile|Remove|RemoveAll|Rename)|exec\.' server/internal/filetransfer server/internal/relay server/internal/room server/internal/protocol server/cmd/chatroom; then
+	echo "FAIL: filesystem or process access found in zero-knowledge packages"
+	exit 1
+fi
+
+# Two header-stripping locations: board posts and file transfer.
+test "$(rg -n 'proxy_set_header (User-Agent|X-Forwarded-For|X-Real-IP|Forwarded) ""' deploy/nginx/nginx.conf | wc -l)" -eq 8
 test "$(rg -n 'access_log off' deploy/nginx/nginx.conf | wc -l)" -eq 1
 test "$(rg -n 'driver: none' docker-compose.yml | wc -l)" -eq 2
 test "$(rg -n 'Cache-Control.*no-store' deploy/nginx/nginx.conf | wc -l)" -ge 1
+# File uploads have no size ceiling: the relay bounds lifetime, not bytes.
+test "$(rg -n 'client_max_body_size 0' deploy/nginx/nginx.conf | wc -l)" -ge 1
 
 echo "PASS: browser chat storage, IP access, telemetry, and sensitive log patterns absent"
 echo "PASS: forum persistence is limited to names/messages/replies; no IP, MAC, time, or request metadata fields"
 echo "PASS: Nginx access logs and Docker container logs disabled"
+echo "PASS: file transfer packages touch no filesystem and no process; uploads stream with no size ceiling"
 echo "NOTE: certgen writes only a TLS certificate and key to /run/chat-tls tmpfs; it has no chat data input"
