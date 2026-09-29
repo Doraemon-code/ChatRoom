@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"lan-chat/server/internal/filetransfer"
 	"lan-chat/server/internal/protocol"
 	"lan-chat/server/internal/room"
 )
@@ -24,6 +25,10 @@ type Config struct {
 	// to decide. It starts when the room replies join_pending.
 	ApprovalTimeout time.Duration
 	PingInterval    time.Duration
+	// Files, when set, backs the file_token_request flow: the relay mints
+	// single-use HTTP transfer tokens bound to the sender's room, and wipes
+	// stored files when the last member leaves. Nil disables file transfer.
+	Files *filetransfer.Store
 }
 
 type Handler struct {
@@ -140,9 +145,16 @@ func (h *Handler) serveConnection(ctx context.Context, c *websocket.Conn, connec
 			}
 			if !result.Deleted {
 				h.broadcastPresence(currentRoom)
+			} else if h.config.Files != nil {
+				// The room is gone: nobody can download anymore, so its
+				// stored ciphertext must not outlive it.
+				h.config.Files.WipeRoom(currentRoom)
 			}
 		} else if pending.roomID != "" {
 			h.rooms.CancelAdmission(pending.roomID, connectionID)
+		}
+		if h.config.Files != nil {
+			h.config.Files.RevokeConnection(connectionID)
 		}
 		cancel()
 		select {
@@ -254,6 +266,29 @@ func (h *Handler) serveConnection(ctx context.Context, c *websocket.Conn, connec
 				return
 			}
 			h.broadcastPresence(currentRoom)
+
+		case *protocol.FileTokenRequest:
+			if state != joined {
+				h.enqueue(send, errorFrame("INVALID_MESSAGE"))
+				return
+			}
+			if h.config.Files == nil {
+				h.enqueue(send, errorFrame("FILE_DISABLED"))
+				continue
+			}
+			token, ttl, err := h.config.Files.MintToken(connectionID, currentRoom)
+			if err != nil {
+				h.enqueue(send, errorFrame("FILE_TOKEN_LIMIT"))
+				continue
+			}
+			granted := protocol.Marshal(protocol.FileToken{
+				V:         protocol.Version,
+				Type:      "file_token",
+				Token:     base64.RawURLEncoding.EncodeToString(token),
+				ExpiresIn: max(int(ttl.Round(time.Second).Seconds()), 1),
+			})
+			clear(token)
+			h.enqueue(send, granted)
 		}
 	}
 }
@@ -265,9 +300,13 @@ func (h *Handler) writer(ctx context.Context, c *websocket.Conn, send <-chan []b
 	for {
 		select {
 		case <-ctx.Done():
+			h.drain(c, send)
 			return
 		case data := <-send:
-			writeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			// Deliberately not derived from ctx: teardown cancels ctx, and a
+			// queued frame selected in the same instant must still go out —
+			// the deferred c.Close bounds this write from the other side.
+			writeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			err := c.Write(writeCtx, websocket.MessageText, data)
 			cancel()
 			if err != nil {
@@ -280,6 +319,27 @@ func (h *Handler) writer(ctx context.Context, c *websocket.Conn, send <-chan []b
 			if err != nil {
 				return
 			}
+		}
+	}
+}
+
+// drain flushes frames that were already queued when the connection began
+// shutting down — most importantly a just-sent error frame, so the peer learns
+// why it was closed. Bounded to a fraction of the close wait: a stalled peer
+// cannot delay connection teardown.
+func (h *Handler) drain(c *websocket.Conn, send <-chan []byte) {
+	deadline := time.Now().Add(250 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		select {
+		case data := <-send:
+			writeCtx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+			err := c.Write(writeCtx, websocket.MessageText, data)
+			cancel()
+			if err != nil {
+				return
+			}
+		default:
+			return
 		}
 	}
 }

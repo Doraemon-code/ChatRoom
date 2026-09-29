@@ -1,9 +1,12 @@
 package relay
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +14,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"lan-chat/server/internal/filetransfer"
 	"lan-chat/server/internal/protocol"
 	"lan-chat/server/internal/room"
 )
@@ -282,4 +286,161 @@ func TestRateLimitClosesConnection(t *testing.T) {
 			return
 		}
 	}
+}
+
+func testServerWithFiles(t *testing.T, m *room.Manager, files *filetransfer.Store) *httptest.Server {
+	t.Helper()
+	h := NewHandler(m, Config{AllowedOrigins: map[string]struct{}{testOrigin: {}}, MaxConnections: 10, HandshakeTimeout: time.Second, ApprovalTimeout: time.Hour, PingInterval: time.Hour, Files: files})
+	s := httptest.NewServer(h)
+	t.Cleanup(func() { h.CloseAll(); s.Close() })
+	return s
+}
+
+// relayFrame builds one upload frame: [12 IV][4 BE length][ciphertext].
+func relayFrame(body []byte) io.Reader {
+	head := make([]byte, filetransfer.ChunkHeaderSize)
+	binary.BigEndian.PutUint32(head[12:16], uint32(len(body)))
+	return io.MultiReader(bytes.NewReader(head), bytes.NewReader(body))
+}
+
+func waitUntil(t *testing.T, what string, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}
+
+func storeTestFile(t *testing.T, files *filetransfer.Store, fileID string) {
+	t.Helper()
+	u, err := files.Begin(fileID, roomID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := u.ReadChunk(relayFrame(bytes.Repeat([]byte{0x61}, 32))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := files.Complete(u); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFileTokenGrantAndLimit(t *testing.T) {
+	files := filetransfer.NewStore(filetransfer.Config{})
+	s := testServerWithFiles(t, room.NewManager(8, 5), files)
+	a := dial(t, s, testOrigin)
+	enterAsOwner(t, a)
+
+	writeJSON(t, a, protocol.FileTokenRequest{V: 1, Type: "file_token_request"})
+	var granted protocol.FileToken
+	if err := json.Unmarshal(readType(t, a, "file_token"), &granted); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(granted.Token)
+	if err != nil || len(raw) != 32 {
+		t.Fatalf("bad token (%d bytes): %v", len(raw), err)
+	}
+	if granted.ExpiresIn < 1 || granted.ExpiresIn > 600 {
+		t.Fatalf("expiresIn out of range: %d", granted.ExpiresIn)
+	}
+
+	// Live tokens are capped per connection: fill the remainder, then one more
+	// request is refused without closing the connection.
+	for i := 0; i < filetransfer.MaxTokensPerConn-1; i++ {
+		writeJSON(t, a, protocol.FileTokenRequest{V: 1, Type: "file_token_request"})
+		readType(t, a, "file_token")
+	}
+	writeJSON(t, a, protocol.FileTokenRequest{V: 1, Type: "file_token_request"})
+	var limited protocol.ErrorMessage
+	if err := json.Unmarshal(readType(t, a, "error"), &limited); err != nil {
+		t.Fatal(err)
+	}
+	if limited.Code != "FILE_TOKEN_LIMIT" {
+		t.Fatalf("want FILE_TOKEN_LIMIT, got %s", limited.Code)
+	}
+}
+
+func TestFileTokenRequiresJoinedConnection(t *testing.T) {
+	files := filetransfer.NewStore(filetransfer.Config{})
+	s := testServerWithFiles(t, room.NewManager(8, 5), files)
+	a := dial(t, s, testOrigin)
+	writeJSON(t, a, protocol.FileTokenRequest{V: 1, Type: "file_token_request"})
+	var refused protocol.ErrorMessage
+	if err := json.Unmarshal(readType(t, a, "error"), &refused); err != nil {
+		t.Fatal(err)
+	}
+	if refused.Code != "INVALID_MESSAGE" {
+		t.Fatalf("want INVALID_MESSAGE, got %s", refused.Code)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if _, _, err := a.Read(ctx); err == nil {
+		t.Fatal("connection stayed open after protocol violation")
+	}
+}
+
+func TestFileTransferDisabledWithoutStore(t *testing.T) {
+	s := testServerWithFiles(t, room.NewManager(8, 5), nil)
+	a := dial(t, s, testOrigin)
+	enterAsOwner(t, a)
+	writeJSON(t, a, protocol.FileTokenRequest{V: 1, Type: "file_token_request"})
+	var disabled protocol.ErrorMessage
+	if err := json.Unmarshal(readType(t, a, "error"), &disabled); err != nil {
+		t.Fatal(err)
+	}
+	if disabled.Code != "FILE_DISABLED" {
+		t.Fatalf("want FILE_DISABLED, got %s", disabled.Code)
+	}
+}
+
+func TestDisconnectRevokesTokensAndEmptyRoomWipesFiles(t *testing.T) {
+	files := filetransfer.NewStore(filetransfer.Config{TTL: time.Hour})
+	s := testServerWithFiles(t, room.NewManager(8, 5), files)
+	a := dial(t, s, testOrigin)
+	enterAsOwner(t, a)
+	b := dial(t, s, testOrigin)
+	joinWithApproval(t, a, b)
+
+	storeTestFile(t, files, idB)
+
+	// b holds a live token, then departs: the token is revoked while the
+	// room — and its file — live on.
+	writeJSON(t, b, protocol.FileTokenRequest{V: 1, Type: "file_token_request"})
+	readType(t, b, "file_token")
+	_ = b.Close(websocket.StatusNormalClosure, "")
+	waitUntil(t, "token revocation", func() bool { return files.TokenCount() == 0 })
+	if files.FileCount() != 1 {
+		t.Fatal("file wiped while room still occupied")
+	}
+
+	// The last member leaves: room and stored ciphertext go together.
+	_ = a.Close(websocket.StatusNormalClosure, "")
+	waitUntil(t, "room wipe", func() bool { return files.FileCount() == 0 })
+}
+
+func TestFileExpiryBroadcastsToRoom(t *testing.T) {
+	m := room.NewManager(8, 5)
+	files := filetransfer.NewStore(filetransfer.Config{
+		TTL: 50 * time.Millisecond,
+		OnExpired: func(id, fileID string) {
+			m.Broadcast(id, "", protocol.Marshal(protocol.FileExpired{V: protocol.Version, Type: "file_expired", FileID: fileID}))
+		},
+	})
+	s := testServerWithFiles(t, m, files)
+	a := dial(t, s, testOrigin)
+	enterAsOwner(t, a)
+
+	storeTestFile(t, files, idB)
+	var expired protocol.FileExpired
+	if err := json.Unmarshal(readType(t, a, "file_expired"), &expired); err != nil {
+		t.Fatal(err)
+	}
+	if expired.FileID != idB {
+		t.Fatalf("wrong file id in broadcast: %s", expired.FileID)
+	}
+	waitUntil(t, "expiry wipe", func() bool { return files.FileCount() == 0 })
 }

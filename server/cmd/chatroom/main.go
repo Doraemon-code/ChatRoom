@@ -12,7 +12,9 @@ import (
 	"syscall"
 	"time"
 
+	"lan-chat/server/internal/filetransfer"
 	"lan-chat/server/internal/forum"
+	"lan-chat/server/internal/protocol"
 	"lan-chat/server/internal/relay"
 	"lan-chat/server/internal/room"
 )
@@ -33,17 +35,27 @@ func main() {
 		}
 	}
 	rooms := room.NewManager(intEnv("MAX_ROOMS", 1000), intEnv("MAX_MEMBERS_PER_ROOM", 50))
-	handler := relay.NewHandler(rooms, relay.Config{AllowedOrigins: origins, MaxConnections: intEnv("MAX_CONNECTIONS", 2000), HandshakeTimeout: 15 * time.Second, ApprovalTimeout: 60 * time.Second, PingInterval: 30 * time.Second})
+	// Stored files announce their own expiry to the room; the broadcast runs
+	// on the store's timer goroutine with no store or room lock held.
+	files := filetransfer.NewStore(filetransfer.Config{
+		OnExpired: func(roomID, fileID string) {
+			rooms.Broadcast(roomID, "", protocol.Marshal(protocol.FileExpired{V: protocol.Version, Type: "file_expired", FileID: fileID}))
+		},
+	})
+	handler := relay.NewHandler(rooms, relay.Config{AllowedOrigins: origins, MaxConnections: intEnv("MAX_CONNECTIONS", 2000), HandshakeTimeout: 15 * time.Second, ApprovalTimeout: 60 * time.Second, PingInterval: 30 * time.Second, Files: files})
 	forumStore, err := forum.NewStore(env("FORUM_DATA_PATH", "/data/forum.json"), intEnv("MAX_FORUM_POSTS", forum.DefaultMaxPosts))
 	if err != nil {
 		log.Print("fatal:forum_store")
 		os.Exit(1)
 	}
 	forumHandler := forum.NewHandler(forumStore, forum.Config{AllowedOrigins: origins, MaxBodyBytes: forum.MaxRequestBytes})
+	filesHandler := filetransfer.NewHandler(files, filetransfer.HandlerConfig{AllowedOrigins: origins})
 	mux := http.NewServeMux()
 	mux.Handle("/ws", handler)
 	mux.Handle("/api/board/posts", forumHandler)
 	mux.Handle("/api/board/posts/", forumHandler)
+	mux.Handle("/api/file/upload", filesHandler)
+	mux.Handle("/api/file/", filesHandler)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusNoContent)
@@ -60,6 +72,9 @@ func main() {
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
 	handler.CloseAll()
+	// Zero every stored file before the HTTP server drains: in-flight
+	// downloads observe the wipe via their cancelled contexts.
+	files.WipeAll()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = server.Shutdown(ctx)
