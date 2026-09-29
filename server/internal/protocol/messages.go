@@ -77,6 +77,14 @@ type Ciphertext struct {
 	Ciphertext        string `json:"ciphertext"`
 }
 
+// FileTokenRequest asks the relay for a single-use HTTP transfer token bound
+// to the sender's current room. Only legal from a joined connection; the token
+// authorizes exactly one /api/file upload or download.
+type FileTokenRequest struct {
+	V    int    `json:"v"`
+	Type string `json:"type"`
+}
+
 type ErrorMessage struct {
 	V    int    `json:"v"`
 	Type string `json:"type"`
@@ -117,6 +125,25 @@ type Presence struct {
 	Members          []Member `json:"members"`
 }
 
+// FileToken carries a one-time bearer capability for a single HTTP file
+// operation. The relay stores only SHA-256(token); the raw bytes exist solely
+// in this frame and the client's memory.
+type FileToken struct {
+	V         int    `json:"v"`
+	Type      string `json:"type"`
+	Token     string `json:"token"`
+	ExpiresIn int    `json:"expiresIn"`
+}
+
+// FileExpired is broadcast to the room when a stored file reaches its TTL,
+// whether the wipe happens immediately or after the last active download
+// finishes. Clients flip the file card to its expired state.
+type FileExpired struct {
+	V      int    `json:"v"`
+	Type   string `json:"type"`
+	FileID string `json:"fileId"`
+}
+
 func Decode(data []byte) (any, error) {
 	if len(data) == 0 || len(data) > MaxFrameBytes {
 		return nil, errors.New("invalid frame size")
@@ -137,6 +164,8 @@ func Decode(data []byte) (any, error) {
 		target = &AdmissionComplete{}
 	case "ciphertext":
 		target = &Ciphertext{}
+	case "file_token_request":
+		target = &FileTokenRequest{}
 	default:
 		return nil, errors.New("unknown type")
 	}
@@ -156,6 +185,12 @@ func Decode(data []byte) (any, error) {
 
 func validIdentity(roomID, ephemeralID, nickname string) bool {
 	return roomPattern.MatchString(roomID) && uuidPattern.MatchString(ephemeralID) && validNickname(nickname)
+}
+
+// ValidUUID reports whether value is a canonical lowercase UUIDv4. File IDs
+// minted by clients and echoed in file_expired frames must match it.
+func ValidUUID(value string) bool {
+	return uuidPattern.MatchString(value)
 }
 
 func validNickname(value string) bool {
@@ -195,6 +230,19 @@ func validate(v any) error {
 		}
 	case *AdmissionComplete:
 		// Strict decoder already guarantees this message has no extra payload.
+	case *FileTokenRequest:
+		// Strict decoder already guarantees this message has no extra payload.
+	case *FileToken:
+		if _, ok := decodeFixed(m.Token, 32); !ok {
+			return errors.New("invalid file token")
+		}
+		if m.ExpiresIn < 1 || m.ExpiresIn > 600 {
+			return errors.New("invalid file token expiry")
+		}
+	case *FileExpired:
+		if !ValidUUID(m.FileID) {
+			return errors.New("invalid file id")
+		}
 	case *Ciphertext:
 		if !roomPattern.MatchString(m.RoomID) || !uuidPattern.MatchString(m.SenderEphemeralID) || !uuidPattern.MatchString(m.MessageID) {
 			return errors.New("invalid ciphertext identity")

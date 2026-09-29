@@ -75,3 +75,48 @@ func TestRenameSupportsMobileUserChosenNamesSafely(t *testing.T) {
 		}
 	}
 }
+
+func TestFileTokenRequestStrictDecode(t *testing.T) {
+	if _, err := Decode([]byte(`{"v":1,"type":"file_token_request"}`)); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{
+		`{"v":1,"type":"file_token_request","extra":1}`,
+		`{"v":1,"type":"file_token_request"}{}`,
+		`{"v":1,"type":"file_token"}`,
+		`{"v":1,"type":"file_expired"}`,
+	} {
+		if _, err := Decode([]byte(bad)); err == nil {
+			t.Fatalf("accepted %s", bad)
+		}
+	}
+}
+
+func TestFileTokenValidation(t *testing.T) {
+	good := FileToken{V: 1, Type: "file_token", Token: base64.RawURLEncoding.EncodeToString(make([]byte, 32)), ExpiresIn: 60}
+	if err := validate(&good); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []FileToken{
+		{V: 1, Type: "file_token", Token: base64.RawURLEncoding.EncodeToString(make([]byte, 31)), ExpiresIn: 60},
+		{V: 1, Type: "file_token", Token: base64.RawURLEncoding.EncodeToString(make([]byte, 33)), ExpiresIn: 60},
+		{V: 1, Type: "file_token", Token: "not_base64!!", ExpiresIn: 60},
+		{V: 1, Type: "file_token", Token: good.Token, ExpiresIn: 0},
+		{V: 1, Type: "file_token", Token: good.Token, ExpiresIn: 601},
+	} {
+		if err := validate(&bad); err == nil {
+			t.Fatalf("accepted token: %+v", bad)
+		}
+	}
+}
+
+func TestFileExpiredValidation(t *testing.T) {
+	if err := validate(&FileExpired{V: 1, Type: "file_expired", FileID: validID}); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"", "not-a-uuid", strings.ToUpper(validID)} {
+		if err := validate(&FileExpired{V: 1, Type: "file_expired", FileID: bad}); err == nil {
+			t.Fatalf("accepted file id %q", bad)
+		}
+	}
+}
