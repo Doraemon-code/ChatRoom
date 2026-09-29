@@ -56,6 +56,7 @@ flowchart LR
     HANDLER[WS handler/state machine]
     RM[Room manager]
     FORUM[Forum HTTP handler + JSON store]
+    FILES[File transfer store + HTTP endpoints<br/>RAM-only chunks, 5-min TTL]
     LIMIT[Global + connection limits]
     SAFELOG[Allowlisted lifecycle log]
   end
@@ -63,6 +64,7 @@ flowchart LR
   WS -->|JSON frames| TLS --> HANDLER
   HANDLER --> RM
   UI -->|GET/POST forum| TLS --> FORUM
+  UI -->|POST/GET file chunks| TLS --> FILES
   HANDLER --> LIMIT
   HANDLER -. fixed codes only .-> SAFELOG
 ```
@@ -80,6 +82,7 @@ server/                 Go module
   internal/protocol/    Strict envelopes and validation
   internal/relay/       WS connection state machine/limits
   internal/forum/       Public forum store/API; only name/message/replies
+  internal/filetransfer/ RAM-only chunked file store + streaming HTTP endpoints
 deploy/nginx/           TLS/static/proxy config and startup
 docs/                   Product, architecture, security, audit
 ```
@@ -225,7 +228,7 @@ E2EE protects content across T3/T4 only while浏览器加载的是可信前端�
 
 ## 13. Server RAM Policy
 
-允许：活动 roomId、成员 connectionId/ephemeralId/nickname/socket queue、待审批申请、连接限流 bucket、瞬态 ciphertext frame（文本或图片）。改名在 manager lock 内替换当前 Member nickname 并广播 presence，不生成历史。论坛请求体在 Store 写入前只保留 `name`、`message` 和回复列表中的这两个字段。  
+允许：活动 roomId、成员 connectionId/ephemeralId/nickname/socket queue、待审批申请、连接限流 bucket、瞬态 ciphertext frame（文本或图片）、文件分块密文（RAM 缓冲，5 分钟 TTL，擦除即逐块清零）、单次性传输 token 的 SHA-256 摘要（≤60 秒，原始值不存储）。改名在 manager lock 内替换当前 Member nickname 并广播 presence，不生成历史。论坛请求体在 Store 写入前只保留 `name`、`message` 和回复列表中的这两个字段。  
 禁止：RoomKey、plaintext password/message、聊天室 `messages/history`、IP/header/UA、account/device/fingerprint、tombstone、analytics、除论坛 Store 外的跨重启 state。
 
 ## 14. Zero-Persistence Logging Policy
@@ -260,3 +263,6 @@ Store 使用进程内互斥锁、严格 JSON decoder、固定大小上限和 060
 - 客户端掉线：不补发；UI 返回首页并清除 state。
 - 广播时慢接收者：断开慢客户端；不阻塞、不扩容 queue。
 - browser crypto 不支持或非 secure context：fail closed，不发送明文。
+- 文件上传中断/坏帧/超出上传窗口：立即逐块清零并删除 entry，客户端得到 4xx；没有任何未完成字节残留。
+- 文件到期：5 分钟 TTL 到点且无进行中下载即清零删除并广播 `file_expired`；进行中下载可延续至完成后立即清零（硬上限再 5 分钟）。到期后下载返回 410。
+- 房间清空或服务关停：同一条擦除路径清零该房间/全部文件；无 tombstone、无落盘。

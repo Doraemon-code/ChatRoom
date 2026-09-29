@@ -7,6 +7,7 @@
 | Root room secret | CSPRNG | 256 bits via `crypto.getRandomValues` |
 | Sender subkey | HKDF-SHA-256 | 256-bit output; salt=roomId; domain-separated info + senderId |
 | Message AEAD | AES-256-GCM | 96-bit IV, 128-bit tag, authenticated metadata AAD |
+| File subkey + chunk AEAD | HKDF-SHA-256 + AES-256-GCM | salt=roomId, info=`lan-chat-file-v1\n{senderId}\n{fileId}`；每文件独立密钥，每块独立随机 96-bit IV，AAD 绑定 fileId + chunkIndex + chunkCount（防截断、乱序与拼接） |
 | RoomKey hand-off | ECDH P-256 + HKDF-SHA-256 + AES-256-GCM | owner wraps RoomKey to the joiner's one-time public key, bound to roomId + requestId |
 | Identifiers | browser CSPRNG | UUIDv4 for ephemeral/message IDs; room number is one of eight fixed slots (0001–0008) |
 
@@ -39,6 +40,7 @@ RoomKey 明文永不发送 Relay；只有房主用 ECDH 派生的临时密钥封
 - 没有口令意味着没有第二道门槛：房主误批，或房主本人不可信，都会直接导致泄露。
 - 被动读 Relay RAM 的攻击者只能看到密文、封装结果和在线元数据，无法解出 RoomKey。
 - 图片与文本走同一条加密路径：浏览器先把图片压缩到约 500KB 以内，再作为明文一起 AES-GCM 加密。
+- 文件也走同一条 E2E 路径：每文件从 RoomKey 独立派生 HKDF 子密钥，按 ≤1 MiB 分块独立 AES-GCM 加密后经 HTTP 流式通道传输；Relay 只缓冲密文字节，无法解密，也看不到文件名等元数据（它们在加密通告内）。
 
 ## Nonce Policy
 
@@ -75,7 +77,7 @@ timestamp 被刻意省略：它需要时钟/窗口策略，会增加元数据，
 ## Resource and Protocol Hardening
 
 - 全局 2,000 connections、1,000 rooms，房间 50 members。
-- 2 MiB frame、1 MiB plaintext 设计上限（容纳压缩图片）；严格 decoder/字段长度。
+- 2 MiB frame、1 MiB plaintext 设计上限（容纳压缩图片）；严格 decoder/字段长度。文件传输是刻意的例外：文件字节不走 WebSocket，而是走独立 HTTP 流式通道（`/api/file/*`），总量无上限，每块明文 ≤1 MiB、独立 AES-GCM。Relay 以 5 分钟生命周期而非字节数约束内存占用，到期逐块清零；下载凭单次性 Bearer token（Relay 只存 SHA-256 摘要，≤60 秒）。
 - 每连接 token bucket；待审批申请和限流状态都 connection scoped。
 - 握手 15 秒、房主审批等待 60 秒 deadline；ping 30 秒、pong/read liveness；bounded outbound queue 32 frames。
 - 未认证连接不能创建多个房间或发送 ciphertext；一个 socket 只允许一次 create/join lifecycle。

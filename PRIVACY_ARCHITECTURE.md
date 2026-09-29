@@ -12,6 +12,9 @@
 | Derived SenderKey | Yes | No | No | non-extractable `CryptoKey`，页面生命周期 |
 | Image bytes (plaintext) | Yes, transient | No | No | 压缩后的图片只在加密/解密调用期间存在，随后仅随消息列表留在浏览器 RAM |
 | Image ciphertext | Yes, transient | Yes, transient | No | 作为大号 ciphertext frame 由 Relay 转发，不加入历史 |
+| File chunk ciphertext | Yes, transient | Yes, ≤5 分钟 TTL | No | HTTP 流式通道逐块缓冲于 Relay RAM（总量无上限）；到期、上传中断、房间清空或关停时逐块清零后删除，不落盘、不记日志 |
+| File transfer token | Yes, transient | SHA-256 摘要 only | No | 32-byte 单次性 Bearer token；Relay 只保存哈希（原始值从不存储，删除即无残留），≤60 秒过期，使用后立即删除 |
+| File announcement（fileId/文件名/类型/大小/总块数/到期时间） | Yes | No | No | 作为 `t:'file'` 明文走与文本相同的 E2E ciphertext 通道；Relay 只见密文 |
 | Room ID/config | Yes | Yes | No | 仅活动 Room；空房立即删除，无 tombstone |
 | Ephemeral identity/nickname | Yes | Yes, current socket | No | 从离线人物表随机分配且可修改；每次页面装载重建，断线移除 |
 | Message/replay ID | Yes | validation only | No | 客户端有界 RAM 去重；Relay 不建立集合 |
@@ -28,9 +31,13 @@
 
 ## Relay RAM boundary
 
-临时聊天室唯一长于一次函数调用的内存业务结构是 `Map<roomId, Room>` 的 Go 等价结构。Room 只含 owner 连接、成员与待审批申请；Member 只含连接 ID、临时身份、发送通道和取消函数。聊天室不存在 message/history/account/IP/device/profile 字段。公共吐槽板由独立 Store 负责持久化线程；线程和回复只含名字与内容。
+临时聊天室长于一次函数调用的内存业务结构有两个：`Map<roomId, Room>` 的 Go 等价结构，以及文件传输 Store 的 `Map<fileId, entry>`。Room 只含 owner 连接、成员与待审批申请；Member 只含连接 ID、临时身份、发送通道和取消函数。聊天室不存在 message/history/account/IP/device/profile 字段。公共吐槽板由独立 Store 负责持久化线程；线程和回复只含名字与内容。
 
 密文在 WebSocket read buffer、严格 decoder 输入与固定容量 outbound channel 中短暂存在。聊天室掉线或队列满不会转储到磁盘，也没有离线队列；论坛提交则同步写入单独的 `/data/forum.json`。最后成员离开时在同一清理路径同步删除 Room。
+
+文件传输 Store 只在 RAM 保存分块密文（每块对应 ≤1 MiB 明文的 GCM 帧原始字节，总量无上限）、单次性 token 的 SHA-256 摘要及房间/连接绑定。文件自上传完成起最多保留 5 分钟：到期且无进行中下载时，服务端在同一临界区内逐块清零、停止定时器、删除 map entry，随后才广播过期事件；唯一例外是过期时刻仍在进行中的下载，可延续至完成后立即清零，硬上限再 +5 分钟。上传中断、坏帧、房间清空与服务关停走同一条擦除路径——先清零后删除，全程不写磁盘、不产生日志，也没有 tombstone。
+
+如实的边界：清零原语（`clear()`）确定性地覆写应用自有的分块缓冲，但 Go 是 GC 语言，帧解码期间的临时切片、net/http 内部缓冲与内核 socket 缓冲中的瞬时副本不在确定性清零范围内。这与 WebSocket 帧转发的瞬态副本同类——不构成可追溯的持久残留，但也不是物理内存擦除保证。
 
 ## Network and host boundary
 

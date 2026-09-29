@@ -15,7 +15,7 @@ docker compose up -d --build
 
 服务默认绑定 `0.0.0.0:443`，可从局域网访问。将 `chat.local` 指向服务器 LAN 地址（内部 DNS，或各客户端 hosts 文件），打开 `https://chat.local`。默认会在容器 tmpfs 生成有效期 7 天的自签证书，浏览器不会信任它，因此仅适合本地验收。正式部署请配置受客户端信任的公司 CA 证书。
 
-本机已将它接入 Hao123 门户：生产入口为 `https://clin-agent.iepose.cn/chat/`，外层 nginx 反代到本机 `127.0.0.1:9443`。门户场景使用根目录的 `.env`：`ALLOWED_ORIGINS` 必须包含门户的完整 origin，`BIND_ADDRESS=127.0.0.1`，并用 `VITE_BASE_PATH=/chat/` 构建前端。外层 nginx 片段见 `../Hao123/deploy/nginx/chatroom.conf`。
+本机已将它接入 Hao123 门户：生产入口为 `https://clin-agent.iepose.cn/chat/`，外层 nginx 反代到本机 `127.0.0.1:9443`。门户场景使用根目录的 `.env`：`ALLOWED_ORIGINS` 必须包含门户的完整 origin，`BIND_ADDRESS=127.0.0.1`，并用 `VITE_BASE_PATH=/chat/` 构建前端。外层 nginx 片段见 `../Hao123/deploy/nginx/chatroom.conf`。文件传输不设大小上限：该片段已设置 `client_max_body_size 0;` 并放宽了代理超时，修改片段后需重载外层 nginx（如 `sudo nginx -s reload`）才会生效。
 
 若测试机 443 端口被占用：
 
@@ -67,11 +67,12 @@ CERT_HOSTS=192.168.10.10
 - RoomKey 由房主用基于 ECDH 的一次性临时密钥封装后交给新成员，不进入 URL，也不被服务器解出。
 - 房主离开后，服务器在剩余成员中随机指定新房主，并拒绝当时的待审批申请。所有人离开后房间立即销毁并回到空置；服务器重启后所有房间消失。
 - 支持发送图片：浏览器先把图片压缩到约 500KB 以内，再与文本一样端到端加密；图片同样只存在内存，不落盘。
+- 支持发送任意大小的文件：无大小上限，逐块端到端加密（每文件独立派生密钥，1 MiB 分块独立 AES-GCM），服务器只在内存缓冲密文分块。文件自上传完成起最多保留 5 分钟，接收方卡片内嵌倒计时；到期后服务器逐块清零删除并通知房间，过期时刻仍在进行中的下载可延续到完成。上传中断、房间清空或服务关停同样立即清零，不留任何可追溯残留。
 - 公共吐槽板是独立的论坛页面，所有人可用当前虚拟名字发帖并回复；帖子在刷新和服务重启后仍可恢复。持久化记录只包含 `name`、`message` 和回复列表中的同样两类字段，不展示或写入发表时间、IP、MAC、User-Agent、连接 ID 等信息。
 
 ## 安全模型
 
-消息使用浏览器 Web Crypto：RoomKey 经 HKDF-SHA-256 派生每发送者 AES-256-GCM key，96-bit IV 由随机 64-bit prefix 与 32-bit 单调计数组成，envelope 路由字段作为 AAD。服务器永远不接收 RoomKey 或聊天明文。
+消息使用浏览器 Web Crypto：RoomKey 经 HKDF-SHA-256 派生每发送者 AES-256-GCM key，96-bit IV 由随机 64-bit prefix 与 32-bit 单调计数组成，envelope 路由字段作为 AAD。文件走同一条 E2E 路径：每文件独立派生 HKDF 子密钥，1 MiB 分块独立 AES-GCM，AAD 绑定文件 ID、块序号与总块数，防止截断、乱序与拼接；服务器永远不接收 RoomKey、聊天明文或文件明文，也看不到文件名。
 
 房间没有密码，加入授权完全依赖当前房主的逐人批准：RoomKey 只在房主同意时经 ECDH 封装转交，任何未被批准的连接拿不到 RoomKey，也就无法解密消息。代价是没有口令作为第二道门槛——安全性取决于房主不误批，以及房主本人的可信度。读取服务器 RAM 的攻击者看不到 RoomKey 或明文，服务器只转发封装密文。
 
@@ -82,7 +83,7 @@ V1 的固定 RoomKey **没有 Forward Secrecy、post-compromise security、成�
 ## 聊天零持久化与吐槽板存储
 
 - 浏览器聊天数据只在 React/JavaScript runtime；不用 LocalStorage、SessionStorage、IndexedDB、Cookie、Service Worker 或 Cache API。
-- 临时聊天室 Relay 只有 RAM Room/Member/待审批申请，不保存聊天历史；公共吐槽板是明确例外，使用 `/data/forum.json` 的命名 Docker volume 保存名字、留言和回复。
+- 临时聊天室 Relay 只有 RAM Room/Member/待审批申请，不保存聊天历史；文件密文分块同样只在 RAM 缓冲，最长 5 分钟即逐块清零，token 只保存 SHA-256 摘要。公共吐槽板是明确例外，使用 `/data/forum.json` 的命名 Docker volume 保存名字、留言和回复。
 - 吐槽板 API 和文件记录严格没有 IP、MAC、发表时间、User-Agent、请求头、连接 ID、随机帖子 ID 等字段；应用代码也不读取 `RemoteAddr` 或转发 IP 头。
 - Nginx access log 关闭，错误日志丢弃；Docker logging driver 为 `none`；应用只允许固定的启动/停止/fatal 类型码。
 - 容器 root filesystem 只读；论坛数据单独挂载 `/data`，临时 TLS 与 `/tmp` 使用 tmpfs；Relay 只接入 internal network，只有 edge 接入可发布端口的 ingress bridge。
@@ -129,11 +130,11 @@ go vet -mod=vendor ./...
 ./scripts/zero-persistence-audit.sh
 ```
 
-测试覆盖 Room 生命周期/房主离开随机转移、房主审批入房、拒绝与取消申请、空房销毁、后加入无历史、刷新身份工厂、3,544 人物名完整性、临时改名同步、服务新实例无恢复、公共板字段边界/持久化/逐条回复恢复、错/对密码与 challenge、AES-GCM/AAD、nonce 唯一与耗尽、replay、oversize、Origin 和连接限流。最终逐项证据见 [Security Audit](docs/SECURITY_AUDIT.md)。人物名的数据来源与生成方法见 [Character Names](docs/CHARACTER_NAMES.md)。
+测试覆盖 Room 生命周期/房主离开随机转移、房主审批入房、拒绝与取消申请、空房销毁、后加入无历史、刷新身份工厂、3,544 人物名完整性、临时改名同步、服务新实例无恢复、公共板字段边界/持久化/逐条回复恢复、错/对密码与 challenge、AES-GCM/AAD、nonce 唯一与耗尽、replay、oversize、Origin 和连接限流，以及文件传输的 RAM 生命周期（上传/下载往返、到期逐块清零、下载延续与硬上限、上传中断擦除、房间清空与关停擦除、token 单次性与每连接限流）、文件分块编解码和文件密钥命名空间隔离。最终逐项证据见 [Security Audit](docs/SECURITY_AUDIT.md)。人物名的数据来源与生成方法见 [Character Names](docs/CHARACTER_NAMES.md)。
 
 ## 不包含的功能
 
-没有账户、好友、私聊、永久昵称、音视频、除图片外的文件传输、永久房主、临时聊天室历史/离线消息、公共房间目录、搜索、审核数据库、管理后台、封禁、IP blacklist、analytics、Sentry、PWA、通知或 reconnect 恢复。公共吐槽板的帖子/回复持久保存，但没有删除、编辑或管理后台；邀请链接/QR 邀请、手动销房、每消息显示期限、WebRTC、语音仅保留在未来路线图。
+没有账户、好友、私聊、永久昵称、音视频、永久房主、临时聊天室历史/离线消息、公共房间目录、搜索、审核数据库、管理后台、封禁、IP blacklist、analytics、Sentry、PWA、通知或 reconnect 恢复。文件仅保留 5 分钟，没有长期文件存储。公共吐槽板的帖子/回复持久保存，但没有删除、编辑或管理后台；邀请链接/QR 邀请、手动销房、每消息显示期限、WebRTC、语音仅保留在未来路线图。
 
 ## 运行限制
 
@@ -141,4 +142,5 @@ go vet -mod=vendor ./...
 - 被控浏览器、恶意扩展、键盘/屏幕采集和接收者保存均可得到明文。
 - `Cache-Control: no-store`、删除 JS 引用和断电不能证明浏览器 GC、swap、hibernate、crash dump 或物理内存中没有残留。
 - 完全不持久识别 IP/设备会限制长期反滥用能力；MVP 只做连接级限流、容量和大小限制，连接洪泛需要基础设施协助。
+- 文件传输没有大小上限：发送中的大文件会等量占用 Relay 内存，直到过期清零（最长约 10 分钟，含下载延续）。多用户并发传输大文件时，建议在 compose 中为 relay 服务设置 `mem_limit`；OOM 重启不会留下任何聊天或文件数据。
 - 上线前应进行独立代码与密码学审计；本项目不面向生命安全或高对抗威胁场景。
