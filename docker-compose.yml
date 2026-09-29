@@ -1,0 +1,72 @@
+services:
+  relay:
+    build:
+      context: .
+      target: relay
+    environment:
+      LISTEN_ADDR: ":8080"
+      ALLOWED_ORIGINS: "${ALLOWED_ORIGINS:-https://chat.local}"
+      MAX_CONNECTIONS: "${MAX_CONNECTIONS:-2000}"
+      MAX_ROOMS: "${MAX_ROOMS:-1000}"
+      MAX_MEMBERS_PER_ROOM: "${MAX_MEMBERS_PER_ROOM:-50}"
+      FORUM_DATA_PATH: "${FORUM_DATA_PATH:-/data/forum.json}"
+      MAX_FORUM_POSTS: "${MAX_FORUM_POSTS:-10000}"
+    volumes:
+      - forum-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=8m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    ulimits:
+      core: 0
+      nofile:
+        soft: 4096
+        hard: 4096
+    logging:
+      driver: none
+    restart: unless-stopped
+    networks: [chat-internal]
+
+  edge:
+    build:
+      context: .
+      target: edge
+    depends_on: [relay]
+    environment:
+      CERT_HOSTS: "${CERT_HOSTS:-chat.local,localhost,127.0.0.1}"
+    ports:
+      - "${BIND_ADDRESS:-0.0.0.0}:${HTTPS_PORT:-443}:8443"
+    volumes:
+      - ./deploy/certs:/certs:ro
+    read_only: true
+    tmpfs:
+      - /run/chat-tls:size=4m,uid=101,gid=101,mode=0700
+      - /tmp:size=16m,uid=101,gid=101,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    ulimits:
+      core: 0
+      nofile:
+        soft: 4096
+        hard: 4096
+    logging:
+      driver: none
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "--spider", "https://127.0.0.1:8443/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+    networks: [chat-edge, chat-internal]
+
+networks:
+  chat-edge:
+  chat-internal:
+    internal: true
+
+volumes:
+  forum-data:

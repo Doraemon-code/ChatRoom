@@ -1,0 +1,8 @@
+web/node_modules/
+web/dist/
+web/*.tsbuildinfo
+deploy/certs/*
+!deploy/certs/.gitkeep
+.env
+coverage/
+.claude/settings.local.json

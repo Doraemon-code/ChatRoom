@@ -1,0 +1,10 @@
+.git
+.agents
+.codex
+web/node_modules
+web/dist
+**/*.test.ts
+**/*_test.go
+docs
+deploy/certs/tls.crt
+deploy/certs/tls.key
