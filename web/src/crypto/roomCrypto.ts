@@ -85,6 +85,42 @@ export async function deriveSenderKey(rootKey: CryptoKey, roomId: string, sender
   )
 }
 
+// File payloads use their own HKDF namespace (and their own random-IV keys),
+// so a file key never coincides with a message key for the same sender.
+export async function deriveFileKey(rootKey: CryptoKey, roomId: string, senderEphemeralId: string, fileId: string): Promise<CryptoKey> {
+  return crypto.subtle.deriveKey(
+    { name: 'HKDF', hash: 'SHA-256', salt: textEncoder.encode(roomId), info: textEncoder.encode(`lan-chat-file-v1\n${senderEphemeralId}\n${fileId}`) },
+    rootKey,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt']
+  )
+}
+
+// Chunk AAD binds every ciphertext to its file and position, so splicing,
+// reordering, or truncating chunks from other transfers fails authentication.
+export function fileAAD(fileId: string, chunkIndex: number, chunkCount: number): Uint8Array {
+  const index = new Uint8Array(4)
+  const count = new Uint8Array(4)
+  new DataView(index.buffer).setUint32(0, chunkIndex, false)
+  new DataView(count.buffer).setUint32(0, chunkCount, false)
+  return concat(new Uint8Array([1]), lengthPrefix(fileId), index, count)
+}
+
+export interface EncryptedChunk { iv: Uint8Array; ciphertext: Uint8Array }
+
+export async function encryptChunk(key: CryptoKey, fileId: string, chunkIndex: number, chunkCount: number, plaintext: Uint8Array): Promise<EncryptedChunk> {
+  const iv = crypto.getRandomValues(new Uint8Array(12))
+  const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: asArrayBuffer(iv), additionalData: asArrayBuffer(fileAAD(fileId, chunkIndex, chunkCount)), tagLength: 128 }, key, asArrayBuffer(plaintext)))
+  plaintext.fill(0)
+  return { iv, ciphertext }
+}
+
+export async function decryptChunk(key: CryptoKey, fileId: string, chunkIndex: number, chunkCount: number, chunk: EncryptedChunk): Promise<Uint8Array<ArrayBuffer>> {
+  if (chunk.iv.length !== 12) throw new Error('INVALID_IV')
+  return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: asArrayBuffer(chunk.iv), additionalData: asArrayBuffer(fileAAD(fileId, chunkIndex, chunkCount)), tagLength: 128 }, key, asArrayBuffer(chunk.ciphertext)))
+}
+
 function lengthPrefix(value: string): Uint8Array {
   const encoded = textEncoder.encode(value)
   const length = new Uint8Array(4)

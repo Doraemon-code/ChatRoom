@@ -12,7 +12,7 @@ export function fromBase64Url(value: string): Uint8Array {
   return Uint8Array.from(binary, (char) => char.charCodeAt(0))
 }
 
-export function concat(...parts: Uint8Array[]): Uint8Array {
+export function concat(...parts: Uint8Array[]): Uint8Array<ArrayBuffer> {
   const output = new Uint8Array(parts.reduce((total, part) => total + part.length, 0))
   let offset = 0
   for (const part of parts) { output.set(part, offset); offset += part.length }

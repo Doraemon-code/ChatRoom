@@ -12,7 +12,11 @@ export default defineConfig(({ mode }) => {
     server: {
       proxy: {
         '/ws': { target: 'ws://localhost:8080', ws: true },
-        '/chat/ws': { target: 'ws://localhost:8080', ws: true }
+        '/chat/ws': { target: 'ws://localhost:8080', ws: true },
+        '/api/file': { target: 'http://localhost:8080' },
+        '/chat/api/file': { target: 'http://localhost:8080', rewrite: (path) => path.replace(/^\/chat/, '') },
+        '/api/board': { target: 'http://localhost:8080' },
+        '/chat/api/board': { target: 'http://localhost:8080', rewrite: (path) => path.replace(/^\/chat/, '') }
       }
     },
     build: { sourcemap: false },

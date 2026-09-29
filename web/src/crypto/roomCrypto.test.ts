@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { MAX_PLAINTEXT_BYTES, NonceSequence, ReplayGuard, decryptMessage, deriveSenderKey, encryptMessage, generateRoomMaterial } from './roomCrypto'
+import { MAX_PLAINTEXT_BYTES, NonceSequence, ReplayGuard, decryptChunk, decryptMessage, deriveFileKey, deriveSenderKey, encryptChunk, encryptMessage, generateRoomMaterial } from './roomCrypto'
 
 const roomId = '0007'
 const senderId = '01890f6e-74e8-4c72-8f9c-61fca85b71e7'
+const fileId = '11890f6e-74e8-4c72-8f9c-61fca85b71e7'
 
 describe('room crypto', () => {
   it('round trips and authenticates metadata', async () => {
@@ -46,5 +47,28 @@ describe('room crypto', () => {
     expect(guard.accept('a', '2')).toBe(true)
     expect(guard.accept('a', '3')).toBe(true)
     expect(guard.accept('a', '1')).toBe(true)
+  })
+
+  it('derives file keys in their own namespace and authenticates chunk position', async () => {
+    const { rootKey } = await generateRoomMaterial()
+    const key = await deriveFileKey(rootKey, roomId, senderId, fileId)
+    const chunkCount = 3
+    const plaintext = crypto.getRandomValues(new Uint8Array(1024))
+    const encrypted = await encryptChunk(key, fileId, 1, chunkCount, plaintext)
+
+    await expect(decryptChunk(key, fileId, 1, chunkCount, encrypted)).resolves.toHaveLength(1024)
+    // A different file id, index, or chunk count must not authenticate; the
+    // file-key namespace is disjoint from message keys by construction.
+    await expect(decryptChunk(key, senderId, 1, chunkCount, encrypted)).rejects.toThrow()
+    await expect(decryptChunk(key, fileId, 0, chunkCount, encrypted)).rejects.toThrow()
+    await expect(decryptChunk(key, fileId, 1, chunkCount + 1, encrypted)).rejects.toThrow()
+  })
+
+  it('zeroes the plaintext copy after encrypting a chunk', async () => {
+    const { rootKey } = await generateRoomMaterial()
+    const key = await deriveFileKey(rootKey, roomId, senderId, fileId)
+    const plaintext = new Uint8Array(256).fill(0x5a)
+    await encryptChunk(key, fileId, 0, 1, plaintext)
+    expect(plaintext.every((byte) => byte === 0)).toBe(true)
   })
 })

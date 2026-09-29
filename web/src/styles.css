@@ -65,9 +65,27 @@ input:focus { border-color: #2a825f; box-shadow: 0 0 0 3px rgba(42,130,95,.12); 
 .message.own span { border-radius: .8rem .2rem .8rem .8rem; color: white; background: #196447; }
 .messageImage { display: block; max-width: min(80%, 26rem); max-height: 22rem; margin-top: .25rem; border-radius: .8rem; border: 1px solid #dbe4de; background: #fff; }
 .message.own .messageImage { border-color: #196447; }
+.fileCard { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: .7rem; margin-top: .25rem; max-width: min(100%, 26rem); padding: .65rem .85rem; border: 1px solid #dbe4de; border-radius: .2rem .8rem .8rem .8rem; background: white; box-shadow: 0 4px 16px rgba(31,65,47,.08); }
+.message.own .fileCard { border-radius: .8rem .2rem .8rem .8rem; border-color: #196447; background: #196447; color: white; }
+.fileIcon { font-size: 1.25rem; line-height: 1; }
+.fileInfo { display: grid; gap: .15rem; min-width: 0; }
+.fileName { font-size: .9rem; overflow-wrap: anywhere; }
+.fileMeta { font-size: .74rem; color: #64756c; font-variant-numeric: tabular-nums; }
+.message.own .fileMeta { color: #cfe4d8; }
+.fileCard.expired { opacity: .7; }
+.fileCard.expired .fileName { text-decoration: line-through; }
+.fileActions { display: flex; align-items: center; gap: .5rem; }
+.fileActions button { padding: .5rem .85rem; font-size: .8rem; }
+.message.own .fileActions .secondary { color: #dff0e6; background: rgba(255,255,255,.16); border-color: rgba(255,255,255,.4); }
+.message.own .fileActions .secondary:hover { background: rgba(255,255,255,.26); }
+.fileProgress { font-size: .75rem; color: #64756c; font-variant-numeric: tabular-nums; }
+.message.own .fileProgress { color: #dff0e6; }
 .fileInput { display: none; }
 .empty { text-align: center; margin-top: 18%; }
-.composer { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; padding: 1rem 1.5rem; border-top: 1px solid #dbe4de; gap: .5rem; }
+.composer { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; padding: 1rem 1.5rem; border-top: 1px solid #dbe4de; gap: .5rem; }
+.uploadBar { display: flex; align-items: center; gap: .75rem; padding: .6rem 1.5rem; border-top: 1px solid #dbe4de; font-size: .82rem; color: #506159; }
+.uploadBar progress { flex: 1; height: .8rem; accent-color: #196447; }
+.uploadBar .fileName { flex-shrink: 0; max-width: 12rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .destroy { margin: 0; padding: 0 1.5rem 1rem; font-size: .75rem; text-align: center; }
 .forum { max-width: 760px; margin: 5vh auto 0; }
 .forumHeader { border-bottom: 1px solid #dbe4de; padding-bottom: 1.25rem; }
@@ -106,6 +124,11 @@ input:focus { border-color: #2a825f; box-shadow: 0 0 0 3px rgba(42,130,95,.12); 
   .roomCard { background: #24372d; color: #c9e0d2; border-color: #3b5346; }
   .roomCard:hover { background: #2c4237; }
   .messageImage { border-color: #2d4036; background: #1a2620; }
+  .fileCard { border-color: #2d4036; background: #26352d; color: #e8efeb; }
+  .message.own .fileCard { border-color: #196447; background: #196447; }
+  .fileMeta, .fileProgress { color: #91aa9c; }
+  .message.own .fileMeta, .message.own .fileProgress { color: #cfe4d8; }
+  .uploadBar { border-color: #2d4036; color: #a4b4ab; }
   .forumComposer textarea { color: #eaf1ed; border-color: #3c5146; background: #111b16; }
   .forumPost strong { color: #9ab5a6; }
   .forumPostsTitle span { color: #91aa9c; }
@@ -140,6 +163,9 @@ input:focus { border-color: #2a825f; box-shadow: 0 0 0 3px rgba(42,130,95,.12); 
   .forumHeader h1 { font-size: clamp(2rem, 12vw, 3.1rem); }
   .forumPostTop { gap: .5rem; }
   .forumReplies, .replyComposer { margin-left: .5rem; }
-  .composer { grid-template-columns: minmax(0, 1fr) auto auto; gap: .5rem; padding-top: .75rem; padding-bottom: .75rem; }
+  .composer { grid-template-columns: minmax(0, 1fr) auto auto auto; gap: .4rem; padding-top: .75rem; padding-bottom: .75rem; }
+  .composer .compact { padding-left: .6rem; padding-right: .6rem; }
   .composer input { width: 100%; }
+  .fileCard { grid-template-columns: auto minmax(0, 1fr); }
+  .fileActions { grid-column: 1 / -1; justify-content: flex-end; }
 }
